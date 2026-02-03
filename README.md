@@ -33,7 +33,7 @@ Generate 3D visualizations similar to MIDAS post-processing style showing force/
 ## 📁 Project Structure
 
 ```
-Osdag_xarray_screening/
+Osdag_xarray_screening_task_fossee/
 ├── data/
 │   └── screening_task.nc          # Input Xarray dataset
 ├── src/
