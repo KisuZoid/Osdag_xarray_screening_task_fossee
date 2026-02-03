@@ -98,7 +98,7 @@ def load_dataset(path):
         raise FileNotFoundError(f"Dataset not found at: {path}")
     
     ds = xr.open_dataset(path)
-    print(f"✓ Dataset loaded successfully")
+    print(f"[OK] Dataset loaded successfully")
     print(f"  Total elements in dataset: {len(ds.coords['Element'])}")
     print(f"  Available components: {list(ds.coords['Component'].values)}")
     return ds
@@ -232,29 +232,47 @@ def build_continuous_girder_values(ds, element_sequence, node_sequence,
 
 def fill_nan_linear(x, y):
     """
-    Fill NaN values in y using linear interpolation based on x positions.
-    
-    Args:
-        x: np.array of positions
-        y: np.array of values (may contain NaN)
-        
-    Returns:
-        np.array: y with NaN values filled by linear interpolation
+    Fill NaN values in y using linear interpolation based on positions x.
+    Robust to duplicate x-values: duplicates are aggregated by averaging
+    non-NaN y-values at that same x before interpolation.
+    If not enough valid points to interpolate, fallback to filling NaNs with 0.
+    Returns array with same shape as y.
     """
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+
+    # if all nan, return as-is
     if np.all(np.isnan(y)):
         return y
-    
-    mask = ~np.isnan(y)
-    if mask.sum() < 2:
-        # Not enough points to interpolate; replace NaNs with zeros
-        return np.nan_to_num(y, nan=0.0)
-    
-    # Create interpolation function from non-NaN points
-    f = interp1d(x[mask], y[mask], kind='linear', 
-                 bounds_error=False, fill_value='extrapolate')
-    y_filled = f(x)
-    
+
+    # Aggregate duplicates in x by averaging y (ignoring NaNs)
+    unique_x, inv = np.unique(x, return_inverse=True)
+    agg_y = np.full_like(unique_x, np.nan, dtype=float)
+    for ui, ux in enumerate(unique_x):
+        mask = (inv == ui)
+        vals = y[mask]
+        vals_non = vals[~np.isnan(vals)]
+        if vals_non.size > 0:
+            agg_y[ui] = vals_non.mean()
+        else:
+            agg_y[ui] = np.nan
+
+    valid_mask = ~np.isnan(agg_y)
+    # if fewer than 2 distinct valid points, try fallback using original non-nan points
+    if valid_mask.sum() < 2:
+        nonnan_mask = ~np.isnan(y)
+        if nonnan_mask.sum() < 2:
+            # not enough points to interpolate — replace NaNs with zero
+            return np.nan_to_num(y, nan=0.0)
+        # use original non-nan points
+        f = interp1d(x[nonnan_mask], y[nonnan_mask], kind='linear', bounds_error=False, fill_value='extrapolate')
+        return f(x)
+
+    # safe to interpolate on unique_x[valid_mask]
+    f = interp1d(unique_x[valid_mask], agg_y[valid_mask], kind='linear', bounds_error=False, fill_value='extrapolate')
+    y_filled = f(x)   # evaluate at original x positions so shape matches
     return y_filled
+
 
 
 # ============================================================================
@@ -372,7 +390,7 @@ def plot_2d_bmd_sfd(positions, mz_values, vy_values, title_prefix="Central Girde
     if save_html:
         outpath = os.path.join(HTML_DIR, save_html)
         fig.write_html(outpath)
-        print(f"✓ Saved interactive HTML: {outpath}")
+        print(f"[OK] Saved interactive HTML: {outpath}")
     
     # Save static PNG (requires kaleido)
     if save_png:
@@ -380,9 +398,9 @@ def plot_2d_bmd_sfd(positions, mz_values, vy_values, title_prefix="Central Girde
             png_filename = f"{title_prefix.replace(' ', '_')}_2D.png"
             png_path = os.path.join(FIG_DIR, png_filename)
             fig.write_image(png_path, scale=2)
-            print(f"✓ Saved static PNG: {png_path}")
+            print(f"[OK] Saved static PNG: {png_path}")
         except Exception as e:
-            print(f"⚠ Could not save PNG (kaleido may not be installed): {e}")
+            print(f"[WARNING] Could not save PNG (kaleido may not be installed): {e}")
     
     return fig
 
@@ -455,63 +473,45 @@ def build_3d_grid_for_girders(ds, girders_dict, component, node_coords):
     return X, Z, Yvals, girder_names
 
 
-def plot_3d_surface(X, Z, Yvals, girder_names, title, save_html=None, 
+def plot_3d_surface(X, Z, Yvals, girder_names, title, save_html=None,
                     save_png=True, vertical_scale=None):
     """
     Create 3D surface plot showing force/moment distribution across all girders.
-    
-    This visualization is similar to MIDAS post-processing style where:
-    - X-axis: Transverse direction (bridge width)
-    - Y-axis: Vertical direction (force/moment magnitude, scaled for visibility)
-    - Z-axis: Longitudinal direction (bridge length)
-    
-    The plot includes:
-    - Colored mesh surface representing force/moment magnitudes
-    - Deck gridlines showing the structure layout
-    - Interactive 3D rotation and zoom
-    
-    Args:
-        X: 2D array of x-coordinates (shape: n_girders × n_nodes)
-        Z: 2D array of z-coordinates
-        Yvals: 2D array of force/moment values
-        girder_names: list of girder names
-        title: str - Plot title
-        save_html: str - Filename for HTML output (optional)
-        save_png: bool - Whether to save PNG
-        vertical_scale: float - Vertical scaling factor (auto-calculated if None)
-        
-    Returns:
-        plotly.graph_objects.Figure: The created 3D figure
+    Fixed: determine `component` before using it in layout.
     """
+    # Determine component (e.g., 'Vy' or 'Mz') from title if available
+    component = title.split(':')[0].strip() if ':' in title else 'component'
+
     # ===== AUTO-CALCULATE VERTICAL SCALE =====
     if vertical_scale is None:
         # Scale so vertical range is ~8-10% of longitudinal span
-        zspan = Z.max() - Z.min()
+        try:
+            zspan = float(np.nanmax(Z) - np.nanmin(Z))
+        except Exception:
+            zspan = 1.0
         max_abs_val = np.nanmax(np.abs(Yvals))
-        
         if max_abs_val > 1e-9:
             vertical_scale = 0.08 * zspan / max_abs_val
         else:
             vertical_scale = 1.0
-    
+
     # Apply vertical scaling for visualization
     Y_plot = Yvals * vertical_scale
-    
+
     # Calculate magnitude for coloring
     mag = np.abs(Yvals)
-    
+
     # ===== CREATE FIGURE =====
     fig = go.Figure()
-    
+
     # ===== ADD DECK GRIDLINES =====
-    # Draw longitudinal lines for each girder
     for i in range(X.shape[0]):
         fig.add_trace(
             go.Scatter3d(
-                x=X[i, :], 
-                y=Y_plot[i, :], 
+                x=X[i, :],
+                y=Y_plot[i, :],
                 z=Z[i, :],
-                mode='lines', 
+                mode='lines',
                 line=dict(width=3, color='gray'),
                 name=f"{girder_names[i]} centerline",
                 showlegend=(i == 0),
@@ -519,106 +519,77 @@ def plot_3d_surface(X, Z, Yvals, girder_names, title, save_html=None,
                 customdata=Yvals[i, :]
             )
         )
-    
+
     # ===== CREATE 3D MESH SURFACE =====
-    # Build triangular mesh from grid points
     ny, nx = X.shape
-    
-    # Flatten vertex coordinates
     verts_x = X.flatten()
     verts_y = Y_plot.flatten()
     verts_z = Z.flatten()
-    
-    # Build face connectivity (two triangles per quad)
+
     faces_i = []
     faces_j = []
     faces_k = []
-    
     def idx(i, j):
-        """Convert 2D grid index to 1D vertex index"""
         return i * nx + j
-    
+
     for i in range(ny - 1):
         for j in range(nx - 1):
-            # Quad vertices:
-            #   a --- b
-            #   |     |
-            #   c --- d
             a = idx(i, j)
             b = idx(i, j + 1)
             c = idx(i + 1, j)
             d = idx(i + 1, j + 1)
-            
-            # Triangle 1: a-b-c
-            faces_i.append(a)
-            faces_j.append(b)
-            faces_k.append(c)
-            
-            # Triangle 2: b-d-c
-            faces_i.append(b)
-            faces_j.append(d)
-            faces_k.append(c)
-    
-    # Add mesh surface with color based on magnitude
+            faces_i += [a, b]
+            faces_j += [b, d]
+            faces_k += [c, c]
+
     mesh = go.Mesh3d(
-        x=verts_x, 
-        y=verts_y, 
+        x=verts_x,
+        y=verts_y,
         z=verts_z,
-        i=faces_i, 
-        j=faces_j, 
+        i=faces_i,
+        j=faces_j,
         k=faces_k,
         intensity=mag.flatten(),
         colorscale='Viridis',
-        colorbar=dict(
-            title='|Value|',
-            x=1.02
-        ),
+        colorbar=dict(title='|Value|', x=1.02),
         opacity=0.85,
         name='Force/Moment Surface',
         hoverinfo='skip'
     )
     fig.add_trace(mesh)
-    
+
     # ===== LAYOUT AND STYLING =====
     fig.update_layout(
-        title=dict(
-            text=title,
-            x=0.5,
-            xanchor='center'
-        ),
+        title=dict(text=title, x=0.5, xanchor='center'),
         scene=dict(
             xaxis_title='Transverse X (m)',
             yaxis_title=f'{component} (scaled × {vertical_scale:.2g})',
             zaxis_title='Longitudinal Z (m)',
             aspectmode='data',
-            camera=dict(
-                eye=dict(x=1.5, y=1.5, z=1.2)
-            )
+            camera=dict(eye=dict(x=1.5, y=1.5, z=1.2))
         ),
         width=1400,
         height=800,
         showlegend=True
     )
-    
-    # Extract component name for filename
-    component = title.split(':')[0] if ':' in title else 'component'
-    
+
     # ===== SAVE OUTPUTS =====
     if save_html:
         outpath = os.path.join(HTML_DIR, save_html)
         fig.write_html(outpath)
-        print(f"✓ Saved interactive 3D HTML: {outpath}")
-    
+        print(f"[OK] Saved interactive 3D HTML: {outpath}")
+
     if save_png:
         try:
             png_filename = f"3D_{component.replace(' ', '_')}.png"
             png_path = os.path.join(FIG_DIR, png_filename)
             fig.write_image(png_path, scale=2, width=1400, height=800)
-            print(f"✓ Saved static 3D PNG: {png_path}")
+            print(f"[OK] Saved static 3D PNG: {png_path}")
         except Exception as e:
-            print(f"⚠ Could not save PNG: {e}")
-    
+            print(f"[WARNING] Could not save PNG: {e}")
+
     return fig
+
 
 
 # ============================================================================
@@ -700,7 +671,7 @@ def main():
             save_png=True
         )
         
-        print("✓ Task 1 completed successfully!")
+        print(f"[OK] Task 1 completed successfully!")
         print()
         
     except Exception as e:
@@ -761,7 +732,7 @@ def main():
             vertical_scale=scale_mz
         )
         
-        print("✓ Task 2 completed successfully!")
+        print(f"[OK] Task 2 completed successfully!")
         print()
         
     except Exception as e:
