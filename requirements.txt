@@ -1,0 +1,8 @@
+xarray>=0.20.0
+netCDF4
+numpy>=1.18
+pandas
+plotly>=5.0
+matplotlib>=3.0
+scipy
+kaleido
