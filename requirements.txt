@@ -1,8 +1,21 @@
-xarray>=0.20.0
-netCDF4
-numpy>=1.18
-pandas
-plotly>=5.0
-matplotlib>=3.0
-scipy
-kaleido
+# Osdag Screening Task - Python Dependencies
+# Install with: pip install -r requirements.txt
+
+# Core data processing
+numpy>=1.24.0
+xarray>=2023.0.0
+netCDF4>=1.6.0
+
+# Plotting and visualization
+plotly>=5.14.0
+kaleido>=0.2.1  # For static image export (PNG)
+
+# Interpolation and scientific computing
+scipy>=1.10.0
+
+# Optional: For matplotlib-based plotting (alternative to Plotly)
+# matplotlib>=3.7.0
+
+# Development tools (optional)
+# ipython>=8.12.0
+# jupyter>=1.0.0
